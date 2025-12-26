@@ -1,5 +1,5 @@
 import torch
-
+import numpy as np
 class PatchSampler:
     """从批量图像中采样patch"""
     def __init__(self, patch_size=64, num_patches_per_image=4):
@@ -7,20 +7,69 @@ class PatchSampler:
         self.num_patches_per_image = num_patches_per_image
 
     def sample_patches(self, batch_a, batch_b):
+        """
+        从有效区域的外接矩形内采样patch
+
+        参数:
+            batch_a: 形状为 (batch_size, channels, height, width) 的tensor
+            batch_b: 形状与batch_a相同的tensor
+
+        返回:
+            patches_a: 采样的patch
+            patches_b: 采样的patch
+        """
         batch_size, channels, height, width = batch_a.shape
-        max_h = height - self.patch_size
-        max_w = width - self.patch_size
+
+        if height < self.patch_size or width < self.patch_size:
+            raise ValueError(f"图像尺寸({height}x{width})小于patch尺寸({self.patch_size}x{self.patch_size})")
 
         patches_a_list = []
         patches_b_list = []
 
-        for i in range(batch_size):
-            for _ in range(self.num_patches_per_image):
-                h_start = torch.randint(0, max_h + 1, (1,)).item()
-                w_start = torch.randint(0, max_w + 1, (1,)).item()
+        half_patch = self.patch_size // 2
 
-                patch_a = batch_a[i, :, h_start:h_start+self.patch_size, w_start:w_start+self.patch_size]
-                patch_b = batch_b[i, :, h_start:h_start+self.patch_size, w_start:w_start+self.patch_size]
+        for i in range(batch_size):
+            # 获取有效区域的mask
+            available_mask = batch_a[i, 0] > 1e-4
+
+            # 找到有效区域的外接矩形
+            non_zero = torch.nonzero(available_mask)
+
+            if len(non_zero) == 0:
+                # 如果没有有效区域，使用整个图像
+                min_h, min_w = 0, 0
+                max_h, max_w = height - 1, width - 1
+            else:
+                min_h = non_zero[:, 0].min().item()
+                max_h = non_zero[:, 0].max().item()
+                min_w = non_zero[:, 1].min().item()
+                max_w = non_zero[:, 1].max().item()
+
+            # 确保外接矩形内有足够的空间放置patch
+            bbox_min_h = max(half_patch, min_h)
+            bbox_max_h = min(height - half_patch - 1, max_h)
+            bbox_min_w = max(half_patch, min_w)
+            bbox_max_w = min(width - half_patch - 1, max_w)
+
+            # 如果外接矩形太小，使用整个图像
+            if bbox_max_h <= bbox_min_h or bbox_max_w <= bbox_min_w:
+                bbox_min_h = half_patch
+                bbox_max_h = height - half_patch - 1
+                bbox_min_w = half_patch
+                bbox_max_w = width - half_patch - 1
+
+            for _ in range(self.num_patches_per_image):
+                # 在外接矩形内随机选择中心点
+                center_h = torch.randint(bbox_min_h, bbox_max_h + 1, (1,)).item()
+                center_w = torch.randint(bbox_min_w, bbox_max_w + 1, (1,)).item()
+
+                # 计算patch起始位置
+                h_start = center_h - half_patch
+                w_start = center_w - half_patch
+
+                # 提取patch
+                patch_a = batch_a[i, :, h_start:h_start + self.patch_size, w_start:w_start + self.patch_size]
+                patch_b = batch_b[i, :, h_start:h_start + self.patch_size, w_start:w_start + self.patch_size]
 
                 patches_a_list.append(patch_a)
                 patches_b_list.append(patch_b)

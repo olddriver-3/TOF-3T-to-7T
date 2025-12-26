@@ -27,69 +27,77 @@ from ssim import ssim_loss
 # ==================== Patch去噪测试函数 ====================
 def patch_denoising_test(model, scheduler, dataloader, num_samples, device, 
                         patch_sampler, logger, iter_num, save_dir, dataset_type):
-    """进行patch级别的去噪测试"""
+    """进行patch级别的去噪测试（使用批处理预测，batch_size=32）"""
     model.eval()
     psnr_values = []
     ssim_values = []
-    
+    PRED_BATCH_SIZE = 32
+
     with torch.no_grad():
-        for i, batch in enumerate(dataloader):
-            if i >= num_samples:
-                break
-            
-            a = batch['A'].to(device)
-            b_gt = batch['B'].to(device)
-            names = batch['name']
-            
-            # 从完整图像中采样patch进行测试
-            a_patches, b_patches = patch_sampler.sample_patches(a, b_gt)
-            
-            # 对每个patch进行去噪
-            for j in range(a_patches.shape[0]):
-                a_patch = a_patches[j:j+1]
-                b_gt_patch = b_patches[j:j+1]
-                
-                # 生成纯噪声
-                noise = torch.randn_like(a_patch)
-                
-                # 去噪过程
-                noisy_images = noise
-                for t in reversed(range(scheduler.num_train_timesteps)):
-                    model_input = torch.cat([noisy_images, a_patch], dim=1)
-                    noise_pred = model(model_input, t).sample
-                    noisy_images = scheduler.step(noise_pred, t, noisy_images).prev_sample
-                
-                fake_b_patch = noisy_images
-                
-                # 计算指标
-                fake_b_np = fake_b_patch[0].cpu().numpy().squeeze()
-                b_gt_np = b_gt_patch[0].cpu().numpy().squeeze()
-                a_np = a_patch[0].cpu().numpy().squeeze()
-                
-                psnr = peak_signal_noise_ratio(b_gt_np, fake_b_np, data_range=1.0)
-                ssim_val = structural_similarity(b_gt_np, fake_b_np, data_range=1.0)
-                
-                psnr_values.append(psnr)
-                ssim_values.append(ssim_val)
-                
-                # 保存图像（只保存第一个patch）
-                if j == 0 and i == 0:
-                    images_dict = {
-                        'a': a_np,
-                        'fake_b': fake_b_np,
-                        'b': b_gt_np
-                    }
-                    logger.save_patch_images(iter_num, dataset_type, images_dict, save_dir)
-    
+        total_batches = min(num_samples, len(dataloader) if hasattr(dataloader, '__len__') else num_samples)
+        with tqdm(total=total_batches, desc=f"Patch test ({dataset_type})", leave=False) as batch_pbar:
+            for i, batch in enumerate(dataloader):
+                if i >= num_samples:
+                    break
+                a = batch['A'].to(device)
+                b_gt = batch['B'].to(device)
+                names = batch['name']
+
+                # 从完整图像中采样patch进行测试
+                a_patches, b_patches = patch_sampler.sample_patches(a, b_gt)
+                num_patches = a_patches.shape[0]
+
+                # 对patch按固定批大小进行去噪
+                with tqdm(total=num_patches, desc="patches", leave=False) as patch_pbar:
+                    for start in range(0, num_patches, PRED_BATCH_SIZE):
+                        end = min(start + PRED_BATCH_SIZE, num_patches)
+                        a_batch = a_patches[start:end].to(device)
+                        b_batch = b_patches[start:end].to(device)
+
+                        # 生成纯噪声并在批次上去噪
+                        noise = torch.rand_like(a_batch) * 2 - 1  # 生成[-1, 1]范围内的噪声
+                        noisy_images = noise
+
+                        for t in reversed(range(scheduler.num_train_timesteps)):
+                            model_input = torch.cat([noisy_images, a_batch], dim=1)
+                            noise_pred = model(model_input, t).sample
+                            noisy_images = scheduler.step(noise_pred, t, noisy_images).prev_sample
+
+                        fake_b_batch = noisy_images
+
+                        # 逐样本计算指标并按需保存图像（只保存首个样本）
+                        for k in range(fake_b_batch.shape[0]):
+                            fake_b_np = fake_b_batch[k].cpu().numpy().squeeze()
+                            b_gt_np = b_batch[k].cpu().numpy().squeeze()
+                            a_np = a_batch[k].cpu().numpy().squeeze()
+
+                            psnr = peak_signal_noise_ratio(b_gt_np, fake_b_np, data_range=1.0)
+                            ssim_val = structural_similarity(b_gt_np, fake_b_np, data_range=1.0)
+
+                            psnr_values.append(psnr)
+                            ssim_values.append(ssim_val)
+
+                            # 保存图像（只保存第一个batch的第一个patch）
+                            if i == 0 and start == 0 and k == 0:
+                                images_dict = {
+                                    'a': a_np,
+                                    'fake_b': fake_b_np,
+                                    'b': b_gt_np
+                                }
+                                logger.save_patch_images(iter_num, dataset_type, images_dict, save_dir)
+
+                        patch_pbar.update(end - start)
+                batch_pbar.update(1)
+
     model.train()
-    
+
     # 计算平均指标
     avg_psnr = np.mean(psnr_values) if psnr_values else 0
     avg_ssim = np.mean(ssim_values) if ssim_values else 0
-    
+
     # 记录指标
     logger.log_testing_patch(iter_num, dataset_type, avg_psnr, avg_ssim)
-    
+
     return avg_psnr, avg_ssim
 
 # ==================== 全图去噪测试函数 ====================
@@ -98,43 +106,49 @@ def full_image_denoising_test(full_denoiser, dataloader, num_samples, device,
     """进行全图级别的去噪测试"""
     psnr_values = []
     ssim_values = []
-    
-    for i, batch in enumerate(dataloader):
-        if i >= num_samples:
-            break
-        
-        a = batch['A'].to(device)
-        b_gt = batch['B'].to(device)
-        names = batch['name']
-        
-        # 对每张完整图像进行去噪
-        for j in range(a.shape[0]):
-            a_image = a[j:j+1]
-            b_gt_image = b_gt[j:j+1]
-            
-            # 使用全图去噪器进行推理
-            fake_b_image, metrics = full_denoiser.denoise_full_image(a_image, b_gt_image)
-            
-            if metrics:
-                psnr_values.append(metrics['psnr'])
-                ssim_values.append(metrics['ssim'])
-            
-            # 保存图像（只保存第一个样本）
-            if j == 0 and i == 0:
-                images_dict = {
-                    'a': a_image[0].cpu().numpy().squeeze(),
-                    'fake_b': fake_b_image,
-                    'b': b_gt_image[0].cpu().numpy().squeeze()
-                }
-                logger.save_full_images(iter_num, dataset_type, images_dict, save_dir)
-    
+
+    total_batches = min(num_samples, len(dataloader) if hasattr(dataloader, '__len__') else num_samples)
+    with tqdm(total=total_batches, desc=f"Full test ({dataset_type})", leave=False) as batch_pbar:
+        for i, batch in enumerate(dataloader):
+            if i >= num_samples:
+                break
+
+            a = batch['A'].to(device)
+            b_gt = batch['B'].to(device)
+            names = batch['name']
+
+            # 对每张完整图像进行去噪
+            with tqdm(total=a.shape[0], desc="images", leave=False) as img_pbar:
+                for j in range(a.shape[0]):
+                    a_image = a[j:j+1]
+                    b_gt_image = b_gt[j:j+1]
+
+                    # 使用全图去噪器进行推理
+                    fake_b_image, metrics = full_denoiser.denoise_full_image(a_image, b_gt_image)
+
+                    if metrics:
+                        psnr_values.append(metrics['psnr'])
+                        ssim_values.append(metrics['ssim'])
+
+                    # 保存图像（只保存第一个样本）
+                    if j == 0 and i == 0:
+                        images_dict = {
+                            'a': a_image[0].cpu().numpy().squeeze(),
+                            'fake_b': fake_b_image,
+                            'b': b_gt_image[0].cpu().numpy().squeeze()
+                        }
+                        logger.save_full_images(iter_num, dataset_type, images_dict, save_dir)
+
+                    img_pbar.update(1)
+            batch_pbar.update(1)
+
     # 计算平均指标
     avg_psnr = np.mean(psnr_values) if psnr_values else 0
     avg_ssim = np.mean(ssim_values) if ssim_values else 0
-    
+
     # 记录指标
     logger.log_testing_full(iter_num, dataset_type, avg_psnr, avg_ssim)
-    
+
     return avg_psnr, avg_ssim
 
 # ==================== 主程序 ====================
@@ -143,22 +157,22 @@ if __name__ == "__main__":
     # 路径参数
     TRAIN_ROOT = r"D:\project\tof_3T_2_7T\data\train"  # 训练集根目录
     VAL_ROOT = r"D:\project\tof_3T_2_7T\data\train"      # 验证集根目录
-    SAVE_DIR = "./experiments"            # 保存目录
+    SAVE_DIR = r"D:\project\tof_3T_2_7T\Exp1_CDDPM\experiments"            # 保存目录
     EXPERIMENT_NAME = "ddpm_patch_experiment1"
     
     # Patch参数
-    PATCH_SIZE = 64
+    PATCH_SIZE = 96
     NUM_PATCHES_PER_IMAGE = 4  # 每张图像采样的patch数量
-    STRIDE = PATCH_SIZE // 4   # 滑动窗口步长（25%重叠）
+    STRIDE = PATCH_SIZE //3  # 滑动窗口步长
     
     # 训练参数
-    BATCH_SIZE = 16
+    BATCH_SIZE = 4
     NUM_ITERS = 100000
     LEARNING_RATE = 1e-4
-    SAVE_INTERVAL = 1000
-    PATCH_TEST_INTERVAL = 100    # patch测试间隔
-    FULL_TEST_INTERVAL = 1000    # 全图测试间隔（较长间隔）
-    NUM_TEST_SAMPLES = 10
+    SAVE_INTERVAL = 2000
+    PATCH_TEST_INTERVAL = 2000    # patch测试间隔
+    FULL_TEST_INTERVAL = 20000    # 全图测试间隔（较长间隔）
+    NUM_TEST_BATCH_SAMPLES = 1
     
     # 损失权重
     MSE_WEIGHT = 0.7
@@ -196,8 +210,8 @@ if __name__ == "__main__":
         # 图像变换（注意：这里不调整大小，保持原始尺寸）
         transform = transforms.Compose([
                 transforms.Resize((608, 552)),  # 调整大小
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5])  # 归一化到[-1, 1]
+                transforms.ToTensor(), #归一化到[0,1]
+                transforms.Normalize((0.5,), (0.5,))  # 归一化到[-1, 1]
         ])
         
         # 创建数据集
@@ -208,7 +222,7 @@ if __name__ == "__main__":
         train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, 
                                  shuffle=True, num_workers=0)
         val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, 
-                               shuffle=False, num_workers=0)
+                               shuffle=True, num_workers=0)
         
         # ==================== 初始化模型和调度器 ====================
         print("初始化模型...")
@@ -283,7 +297,7 @@ if __name__ == "__main__":
             patch_batch_size = a_patches.shape[0]  # BATCH_SIZE * NUM_PATCHES_PER_IMAGE
             
             # 生成噪声
-            noise = torch.randn_like(b_patches)
+            noise = torch.rand_like(b_patches)*2 -1  # 生成[-1, 1]范围内的噪声
             
             # 随机采样时间步
             timesteps = torch.randint(0, scheduler.num_train_timesteps, 
@@ -329,13 +343,13 @@ if __name__ == "__main__":
                 
                 # 在训练集上测试
                 train_psnr, train_ssim = patch_denoising_test(
-                    model, scheduler, train_loader, NUM_TEST_SAMPLES, 
+                    model, scheduler, train_loader, NUM_TEST_BATCH_SAMPLES, 
                     device, patch_sampler, logger, iter_num, images_save_dir, "train"
                 )
                 
                 # 在验证集上测试
                 val_psnr, val_ssim = patch_denoising_test(
-                    model, scheduler, val_loader, NUM_TEST_SAMPLES, 
+                    model, scheduler, val_loader, NUM_TEST_BATCH_SAMPLES, 
                     device, patch_sampler, logger, iter_num, images_save_dir, "val"
                 )
                 
@@ -354,13 +368,13 @@ if __name__ == "__main__":
                 
                 # 在训练集上测试
                 train_psnr, train_ssim = full_image_denoising_test(
-                    full_denoiser, train_loader, NUM_TEST_SAMPLES, 
+                    full_denoiser, train_loader, NUM_TEST_BATCH_SAMPLES, 
                     device, logger, iter_num, images_save_dir, "train"
                 )
                 
                 # 在验证集上测试
                 val_psnr, val_ssim = full_image_denoising_test(
-                    full_denoiser, val_loader, NUM_TEST_SAMPLES, 
+                    full_denoiser, val_loader, NUM_TEST_BATCH_SAMPLES, 
                     device, logger, iter_num, images_save_dir, "val"
                 )
                 

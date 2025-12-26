@@ -13,7 +13,7 @@ class PairedImageDataset:
             self.transform = transforms.Compose([
                 transforms.Resize((608, 552)),  # 调整大小
                 transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5])  # 归一化到[-1, 1]
+                transforms.Normalize((0.5,), (0.5,))  # 归一化到 [-1, 1]
             ])
         else:
             self.transform = transform

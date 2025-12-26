@@ -43,10 +43,7 @@ class MetricsLogger:
         else:
             arr = np.array(img)
 
-        if arr.max() <= 1.0 and arr.min() >= -1.0:
-            # 假设归一化到[-1,1]
-            arr = (arr + 1.0) / 2.0
-        arr = (arr * 255).astype('uint8')
+        arr = (arr * 128 + 128).astype('uint8')#[-1,1] to [0,255]
         return arr
 
     def save_patch_images(self, iter_num, dataset_type, images_dict, save_dir):

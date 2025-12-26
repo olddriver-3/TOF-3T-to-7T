@@ -1,0 +1,7 @@
+*.nrrd
+*.png
+data/
+other_relevent_project/
+experiments/
+mlruns/
+Exp1_CDDPM/experiments/
