@@ -48,19 +48,9 @@ def smart_visualize_array(input_data, max_cols=4):
         else:
             print("检测到最后一个维度长度较低")
     # 检查值范围并还原归一化图像
-    if data.dtype.kind == 'f':  # 浮点类型检测
-        if data.min() >= -1e-6 and data.max() <= 1 + 1e-6:
-            data = (data * 255).clip(0, 255).astype(np.uint8)
-        else:
-            data=data.clip(0, 255).astype(np.uint8)
-    elif data.dtype.kind == 'i' or data.dtype.kind == 'u':  # 整数类型
-        if data.min() < 0 or data.max() > 255:
-            raise ValueError("整数类型值必须在[0,255]范围内")
-    elif data.dtype.kind == 'b':
-        data = data.astype(np.uint8) * 255
-    else:
-        raise TypeError(f"不支持的数据类型: {data.dtype}")
-
+    data = data - data.min() / (data.max() - data.min() + 1e-8)  # 归一化到0-1
+    data = data * 255.0
+    data = data.astype(np.uint8)
     # 获取维度信息
     batch_size, num_channels, height, width = data.shape
     # 可视化逻辑

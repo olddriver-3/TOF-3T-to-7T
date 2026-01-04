@@ -42,8 +42,9 @@ class MetricsLogger:
             arr = img.cpu().numpy().squeeze()
         else:
             arr = np.array(img)
-
-        arr = (arr * 128 + 128).astype('uint8')#[-1,1] to [0,255]
+        #归一化到0-1
+        arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8)
+        arr = (arr * 255).astype('uint8')#[0,1] to [0,255]
         return arr
 
     def save_patch_images(self, iter_num, dataset_type, images_dict, save_dir):

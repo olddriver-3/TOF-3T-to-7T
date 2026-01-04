@@ -13,7 +13,6 @@ class PairedImageDataset:
             self.transform = transforms.Compose([
                 transforms.Resize((608, 552)),  # 调整大小
                 transforms.ToTensor(),
-                transforms.Normalize((0.5,), (0.5,))  # 归一化到 [-1, 1]
             ])
         else:
             self.transform = transform
@@ -50,7 +49,10 @@ class PairedImageDataset:
 
         img_a = self.transform(img_a)
         img_b = self.transform(img_b)
+        #z score normalization
         
+        img_b = (img_b - img_b.mean()) / (img_b.std() + 1e-8)
+        img_a = (img_a - img_a.mean()) / (img_a.std() + 1e-8)
         return {'A': img_a, 'B': img_b, 'name': self.files_a[idx]}
 
 
